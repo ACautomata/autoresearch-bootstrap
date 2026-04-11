@@ -53,6 +53,12 @@ Identify:
 - **Budget**: epochs, steps, or time limit
 - **Output format**: what the training script prints when done
 
+**Multi-metric discipline — must ask the user**: Before proceeding to Phase 3, you MUST:
+1. Ask the user to declare **multiple metrics** available in the project's training output (e.g., val_loss, train_loss, grad_norm, epoch_time, memory, RankMe, FID, etc.)
+2. Ask the user to designate **one** of them as the primary optimization target
+3. Remind the user of this principle: **"When a metric becomes the optimization target, it loses objectivity."** A single metric can be hacked (e.g., lowering val_loss by overfitting, inflating RankMe by shrinking embedding dimension). Always cross-reference secondary metrics to confirm genuine improvement.
+4. Record all declared metrics and include their extraction commands in the generated program.md
+
 ### Phase 3: Generate program.md
 
 **Read [program-template.md](references/program-template.md)** for the full template with all placeholders.

@@ -61,6 +61,10 @@ Training runs for {budget_description}.
 **The goal: get the {best_direction} {primary_metric}.**
 {metric_explanation}
 
+**Multi-metric discipline**: This project tracks multiple metrics. The primary target is `{primary_metric}`, but **when a metric becomes the optimization target, it loses objectivity**. A change that improves `{primary_metric}` while degrading secondary metrics is suspect. Always cross-reference:
+{secondary_metrics_cross_reference}
+Only declare an improvement genuine when the primary metric improves AND secondary metrics are stable or improving. If primary improves but a critical secondary degrades significantly, flag it for human review rather than auto-keeping.
+
 **Memory** is a soft constraint. Some increase is acceptable for meaningful gains.
 
 **Simplicity criterion**: All else being equal, simpler is better. {simplicity_threshold_guidance} A {noise_floor} {primary_metric} improvement that adds {complex_code_lines} lines of hacky code is probably not worth it. A {noise_floor} {primary_metric} improvement from deleting code is definitely worth keeping. An improvement of ~0 but much simpler code is also worth keeping. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude.
@@ -222,3 +226,4 @@ LOOP FOREVER:
 | `{research_ideas}` | Project-specific ideas | Numbered list of 5-10 ideas |
 | `{prepare_scope_table}` | Table of prepare.py scope files | Markdown table rows |
 | `{train_scope_table}` | Table of train.py scope files | Markdown table rows |
+| `{secondary_metrics_cross_reference}` | List of secondary metrics with expected behavior | `- val_loss (should decrease with primary)\n- grad_norm (should stay stable, not explode)\n- train_loss (should not diverge from val_loss)` |
