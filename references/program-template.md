@@ -33,7 +33,11 @@ To set up a new experiment, work with the user to:
    ```
    commit	{primary_metric}	memory_gb	status	description
    ```
-6. **Confirm and go**: Confirm setup looks good.
+6. **Initialize memory index**: Ensure the memory directory exists at `~/.claude/projects/<project-path>/memory/` and add an entry to `MEMORY.md` indexing the autoresearch run:
+   ```
+   - [Autoresearch {tag}](exp_{tag}_overview.md) — experiment run on {date}, optimizing {primary_metric}
+   ```
+7. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -100,6 +104,49 @@ a1b2c3d	{baseline_value}	{baseline_memory}	keep	baseline
 b2c3d4e	{improved_value}	{improved_memory}	keep	{example_improvement}
 ```
 
+## Documenting findings
+
+After **every** experiment (keep, discard, or crash), you MUST write a memory note and append to results.tsv. This ensures no knowledge is lost across the loop.
+
+### Memory notes
+
+Write each experiment's key takeaway to memory (`~/.claude/projects/<project>/memory/`) as a markdown file. Use the `project` memory type. File naming: `exp_<tag>_<short_description>.md`.
+
+Frontmatter format:
+```yaml
+---
+name: exp_<tag>_<short_description>
+description: <one-line summary of the experiment and its outcome>
+type: project
+---
+```
+
+Body must include:
+- **Idea**: what was tried and why
+- **Result**: {primary_metric} value, comparison to baseline
+- **Verdict**: keep/discard/crash — and why
+- **Insight**: what was learned (e.g. "X doesn't help because Y", "Z is promising but needs tuning")
+
+Keep each note concise (5-10 lines of body). The goal is to build a cumulative research log that prevents repeating failed ideas and surfaces patterns.
+
+Example:
+```markdown
+---
+name: exp_apr11_wider_predictor
+description: Wider predictor (256→512 hidden dim) improved val_loss by 2.3%
+type: project
+---
+
+**Idea**: Double predictor hidden dimension to test capacity bottleneck.
+**Result**: val_loss 0.9741 (baseline 0.9972), memory 44.8→46.2 GB
+**Verdict**: keep — significant improvement, modest memory increase
+**Insight**: Predictor was capacity-limited. Wider layers help more than deeper.
+```
+
+### results.tsv
+
+Every experiment must have a row in `results.tsv`. Do not skip crashed or discarded experiments — they are valuable negative results.
+
 ## The experiment loop
 
 The experiment runs on a dedicated branch (e.g. `autoresearch/{today_short_tag}`).
@@ -112,8 +159,9 @@ LOOP FOREVER:
 5. Read out the results: `{metric_extract_command}`
 6. If results can't be found, the run crashed. Check logs and attempt a fix. If you can't fix after a few attempts, give up.
 7. Record the results in `results.tsv` (do NOT commit results.tsv — leave it untracked)
-8. If {primary_metric} improved ({improvement_direction}), advance the branch
-9. If {primary_metric} is equal or worse, git reset back to where you started
+8. **Write a memory note** — save key findings to `memory/exp_<tag>_<description>.md` as documented in "Documenting findings" above. Every experiment gets a note.
+9. If {primary_metric} improved ({improvement_direction}), advance the branch
+10. If {primary_metric} is equal or worse, git reset back to where you started
 
 **Timeout**: Each experiment should take ~{expected_duration}. If a run exceeds {max_duration}, kill it and treat it as failure.
 
