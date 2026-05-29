@@ -85,6 +85,9 @@ const MAX = 30
 while ((budget.total ? budget.remaining() > 50000 : n < MAX) && n < MAX) {
   n++
 
+  // Snapshot git HEAD before experiment changes — used for rollback on discard/crash
+  const preCommit = await agent('git rev-parse HEAD', {schema: {type: "object", properties: {head: {type: "string"}}, required: ["head"]}})
+
   phase('Experiment')
   const idea = await agent(`Experiment #${n} for ${C.project}.
 Best ${C.metric}=${best} (${C.direction} is better). Noise floor: ${C.noiseFloor}.
@@ -97,7 +100,7 @@ Pick an untried idea or invent a new one based on patterns so far.
 Only modify train.py scope files: ${JSON.stringify(C.trainScope)}
 Do NOT touch prepare.py scope: ${JSON.stringify(C.prepareScope)}
 
-Apply the change, commit, and report the idea and files modified.`, {
+Apply the change and report the idea and files modified.`, {
     label: `exp-${n}`,
     schema: {
       type: "object",
@@ -110,13 +113,17 @@ Apply the change, commit, and report the idea and files modified.`, {
   })
 
   log(`#${n}: ${idea.idea}`)
-
-  // Snapshot git HEAD before training — used to enforce rollback on discard/crash
-  const preCommit = await agent('git rev-parse HEAD', {schema: {type: "object", properties: {head: {type: "string"}}, required: ["head"]}})
+  const safeIdeaForCommit = (
+    idea.idea
+      .replace(/[^a-zA-Z0-9 _]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 60) || 'experiment'
+  )
 
   phase('Evaluate')
   const res = await agent(`Evaluate experiment #${n} ("${idea.idea}"):
-1. Commit: git add -A && git commit -m "exp${n}: ${idea.idea.slice(0, 60)}"
+1. Commit: git add -A && printf '%s\n' "exp${n}: ${safeIdeaForCommit}" | git commit -F -
 2. Run: ${C.trainLog}
 3. Timeout: ${C.maxTime}
    - If run exceeds ${C.expectedTime} significantly, still wait for completion but flag as anomalous.
