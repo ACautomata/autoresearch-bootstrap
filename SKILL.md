@@ -3,17 +3,18 @@ name: autoresearch-bootstrap
 description: >
   Bootstrap autonomous ML research on any project. Explores the codebase, classifies
   directories into "prepare.py scope" (fixed infrastructure — data, metrics, callbacks)
-  vs "train.py scope" (modifiable — models, training, losses, optimizers), then generates
-  a Claude Code workflow for autonomous experimentation adapted from karpathy/autoresearch.
-  Use when (1) user wants to set up autonomous research on an ML project, (2) user mentions
-  "autoresearch" or "research workflow" in context of their project, (3) user wants to
-  identify which code to modify vs keep fixed for experimentation. Works on any ML project
-  regardless of framework.
+  vs "train.py scope" (modifiable — models, training, losses, optimizers), then assembles
+  a Claude Code workflow tailored to the user's intent for THIS run and runs it inline via
+  the Workflow tool — nothing is written into the target project (no .claude/workflows/
+  file). Adapted from karpathy/autoresearch. Use when (1) user wants to set up autonomous
+  research on an ML project, (2) user mentions "autoresearch" or "research workflow" in
+  context of their project, (3) user wants to identify which code to modify vs keep fixed
+  for experimentation. Works on any ML project regardless of framework.
 ---
 
 # Autoresearch Bootstrap
 
-Generate a Claude Code workflow that enables autonomous ML research on any project, following the karpathy/autoresearch pattern: fixed infrastructure (prepare.py scope) + modifiable training code (train.py scope) + automated experiment loop.
+Assemble a Claude Code workflow that enables autonomous ML research on any project, following the karpathy/autoresearch pattern: fixed infrastructure (prepare.py scope) + modifiable training code (train.py scope) + automated experiment loop. The workflow is built fresh for each invocation from the user's stated intent and run inline — it is never written into the target project.
 
 ## Workflow
 
@@ -60,11 +61,16 @@ Identify:
 3. Remind the user of this principle: **"When a metric becomes the optimization target, it loses objectivity."** A single metric can be hacked (e.g., lowering val_loss by overfitting, inflating RankMe by shrinking embedding dimension). Always cross-reference secondary metrics to confirm genuine improvement.
 4. Record all declared metrics and include their extraction commands in the generated workflow
 
-### Phase 3: Generate workflow
+### Phase 3: Assemble the workflow (inline — never written to the project)
 
-**Read [workflow-template.js](references/workflow-template.js)** for the full template with all placeholders.
+Phases 1–2 established project-level facts (the metric, the train command, what's in scope). This phase captures what the user wants **this run** and assembles a ready-to-run workflow from it. The assembled workflow is run inline via the Workflow tool and is **never written into the target project** — no `.claude/workflows/` file, no project file of any kind. The Workflow tool persists the script to the *session* directory (out of the repo) so it can be resumed; that is the only copy.
 
-Fill every `{PLACEHOLDER}` in the `C` (config) object with project-specific information from Phase 1-2.
+**Step 1 — Capture this run's intent (must ask the user).** This is what makes each invocation bespoke rather than a canned loop:
+1. **Research focus** → `{research_focus}`: what should this run concentrate on? (e.g. "reduce peak memory", "push val_loss down", "architectural changes only", "sweep losses".) This steers the experiment agent's idea generation.
+2. **Experiment cap** → `{max_experiments}`: how many experiments this run? Pick a number with the user (the loop hard-stops at this cap regardless of token budget).
+3. **Seed ideas**: any specific ideas the user wants tried first? Prepend them to the auto-generated ideas so they run before invented ones (head of `{research_ideas_json}`).
+
+**Step 2 — Fill the config object.** Read [workflow-template.js](references/workflow-template.js) — it is the *blueprint* for the workflow's structure (Setup → Baseline → Experiment loop), not a file to save. Fill every `{PLACEHOLDER}` in the `C` (config) object with values from Phases 1–2 plus Step 1.
 
 **Config values to fill** (all are string literals unless noted):
 
@@ -87,6 +93,8 @@ Fill every `{PLACEHOLDER}` in the `C` (config) object with project-specific info
 | `{data_verification_steps}` | string | How to verify data |
 | `{crash_value}` | **number** | No quotes — sentinel metric for crashes (e.g. `999.0`) |
 | `{research_ideas_json}` | **JSON array** | Replace `/* ... */ []` with `["idea1", ...]` |
+| `{research_focus}` | string | What this run concentrates on (steers idea generation) |
+| `{max_experiments}` | **number** | No quotes — hard cap on experiments this run (e.g. `20`) |
 | `{train_scope_list_json}` | **JSON array** | Replace `/* ... */ []` with `["path/", ...]` |
 | `{prepare_scope_list_json}` | **JSON array** | Replace `/* ... */ []` with `["path/", ...]` |
 | `{secondary_metrics_json}` | **JSON object** | Replace `/* ... */ {}` with `{"metric":"stable"}`. Values: `"stable"`, `"decrease"`, `"increase"`, `"lower_better"`, or free-text |
@@ -106,23 +114,32 @@ The generated workflow must contain:
 5. **Memory notes**: every experiment logged to Claude memory
 6. **results.tsv**: every experiment recorded
 
-Save to `.claude/workflows/{project}-autoresearch.js` in the target project.
+**Step 3 — Assemble the script string.** Produce the final workflow JavaScript by substituting every placeholder in the blueprint with its filled value — one JS string held in context. Sanity-check it parses: number placeholders are bare numbers (no quotes), and the `/* ... */ []` / `/* ... */ {}` sentinels are replaced with real JS arrays/objects. The trailing "Template Variable Reference" block at the end of the blueprint is a comment, so it's harmless to leave in.
 
-### Phase 4: Report
+**Do not write this script into the target project** — no `.claude/workflows/`, no project file. Carry the assembled string into Phase 4, which runs it inline via the Workflow tool.
 
-Print summary:
+### Phase 4: Review, then run inline
+
+**Step 1 — Show the user what will run.** Before launching, present a concise recap and wait for the go-ahead — autonomous loops burn real compute, so a quick look first is worth it:
 - Files classified: N prepare.py scope, M train.py scope
-- Primary metric and direction
-- Training command
-- Research ideas generated
-- Workflow saved to: `.claude/workflows/{project}-autoresearch.js`
-- To start: run the workflow with the Workflow tool
+- Primary metric + direction, and the secondary metrics being cross-referenced
+- Training command and budget
+- **This run's intent**: focus, experiment cap, seeded ideas
+- Where results land: `results.tsv` (untracked) + per-experiment memory notes
+
+Offer to show the full assembled workflow script if the user wants to inspect it.
+
+**Step 2 — Run it inline.** On the user's go, invoke the **Workflow tool** with `script` set to the assembled workflow string. Pass it inline — do **not** point `scriptPath` at a file in the project. The Workflow tool runs the script and persists it to the session directory (out of the repo), so it can be resumed; nothing is written into the target project.
+
+**Step 3 — Report.** Confirm the workflow is running inline, restate the primary metric + direction and the experiment cap, and note that each experiment will append to `results.tsv` and write a memory note as the loop proceeds.
 
 ## Rules
 
 - **Project-agnostic**: works on any ML project
 - **Read before classifying**: never guess a file's role — read it
-- **All placeholders must be filled**: no template boilerplate in output
+- **All placeholders must be filled**: no template boilerplate in the assembled workflow
+- **Never write the workflow into the target project**: assemble it inline and run it via the Workflow tool (inline `script`). The only on-disk copy is the session-directory persistence the Workflow tool does itself — never `.claude/workflows/` in the repo
+- **Tailor per invocation**: capture the run's focus, experiment cap, and seed ideas (Phase 3 Step 1) — the same project can be bootstrapped differently each time
 - **Concrete shell commands**: the workflow must contain exact runnable commands
 - **Metric must be unambiguous**: specify exact number, exact direction, exact extraction method
-- **Valid JS output**: the generated workflow must be valid JavaScript — number placeholders as bare numbers, JSON arrays/objects as JS literals
+- **Valid JS output**: the assembled workflow must be valid JavaScript — number placeholders as bare numbers, JSON arrays/objects as JS literals

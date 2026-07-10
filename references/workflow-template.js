@@ -1,10 +1,11 @@
-// Autoresearch Workflow Template
+// Autoresearch Workflow Blueprint
 //
-// This template is filled by the autoresearch-bootstrap skill and saved to
-// .claude/workflows/{project}-autoresearch.js in the target project.
-//
-// All {PLACEHOLDER} values in the C object are replaced with project-specific
-// values discovered during codebase exploration (Phase 1-2 of the skill).
+// This is the structural blueprint for the workflow. The autoresearch-bootstrap skill
+// fills the {PLACEHOLDER} values (discovered in Phase 1-2 + the run's intent in Phase 3)
+// and assembles the result into a single JS string, then runs it INLINE via the Workflow
+// tool. It is NEVER written into the target project — no .claude/workflows/ file. The
+// Workflow tool persists the script to the session directory (out of the repo); that is
+// the only on-disk copy, and it enables resume.
 
 export const meta = {
   name: '{PROJECT_NAME}-autoresearch',
@@ -24,6 +25,8 @@ export const meta = {
 const C = {
   project:         '{PROJECT_NAME}',
   tag:             '{today_short_tag}',
+  focus:           '{research_focus}',      // what this run concentrates on
+  maxExperiments:  {max_experiments},       // number — hard cap on experiments this run
   metric:          '{primary_metric}',
   direction:       '{best_direction}',      // "lowest" or "highest"
   noiseFloor:      {noise_floor},           // number — smallest meaningful improvement
@@ -80,7 +83,7 @@ log(`Baseline ${C.metric}=${bl.metric}, memory=${bl.memory}GB`)
 /* ── Experiment Loop ────────────────────────────────────────── */
 let best = bl.metric
 let n = 0
-const MAX = 30
+const MAX = C.maxExperiments
 
 while ((budget.total ? budget.remaining() > 50000 : n < MAX) && n < MAX) {
   n++
@@ -90,6 +93,7 @@ while ((budget.total ? budget.remaining() > 50000 : n < MAX) && n < MAX) {
 
   phase('Experiment')
   const idea = await agent(`Experiment #${n} for ${C.project}.
+Run focus: ${C.focus}
 Best ${C.metric}=${best} (${C.direction} is better). Noise floor: ${C.noiseFloor}.
 ${C.simplicityGuide}
 
@@ -193,6 +197,8 @@ return { experiments: n, best, baseline: bl.metric }
    | {data_verification_steps}     | string   | How to verify data is ready       | Check data shards exist      |
    | {crash_value}                 | number   | Metric sentinel for crashes      | 999.0                        |
    | {research_ideas_json}         | JSON[]   | Array of idea strings            | ["Increase LR", "Add dropout"]|
+   | {research_focus}              | string   | This run's concentration          | "reduce peak memory"          |
+   | {max_experiments}             | number   | Hard cap on experiments this run  | 20                            |
    | {train_scope_list_json}       | JSON[]   | Array of modifiable paths         | ["models/", "train.py"]      |
    | {prepare_scope_list_json}     | JSON[]   | Array of fixed paths             | ["data/", "metrics/"]        |
    | {secondary_metrics_json}      | JSON{}   | Object of metric → expectation   | {"grad_norm":"stable", "train_loss":"decrease"} |

@@ -1,6 +1,6 @@
 # autoresearch-bootstrap
 
-一个 Claude Code skill，用于为任意 ML 项目自动生成自治研究环境（autonomous research setup）。遵循 [karpathy/autoresearch](https://github.com/karpathy/autoresearch) 模式：将代码分为「固定基础设施」和「可修改训练代码」两个作用域，然后生成一个 Claude Code **workflow** 让实验循环自动化运行。
+一个 Claude Code skill，用于为任意 ML 项目自动搭建自治研究环境（autonomous research setup）。遵循 [karpathy/autoresearch](https://github.com/karpathy/autoresearch) 模式：将代码分为「固定基础设施」和「可修改训练代码」两个作用域，然后**按本次意图现做现配一个 Claude Code workflow 并内联运行**（不往项目里写任何文件）。
 
 ## 它做了什么
 
@@ -8,14 +8,15 @@
 
 1. **探索** — 读取项目的所有源码、配置、入口文件，理解数据流
 2. **分类** — 将每个文件归入 `prepare.py`（只读，不可修改）或 `train.py`（可修改）作用域
-3. **生成 workflow** — 在目标项目的 `.claude/workflows/` 目录生成一个 Claude Code workflow 脚本：
+3. **组装 workflow 并内联运行** — 根据本次意图（聚焦方向 / 实验上限 / 初始想法）组装一个 Claude Code workflow，给你过目后用 Workflow 工具**内联运行**：
    - 训练命令、预算、主指标及提取方式
    - 自动实验循环（提出想法 → 修改代码 → 训练 → 提取指标 → 保留/回退 → 记录 → 重复）
    - 每次实验自动写入 memory 和 `results.tsv`
    - 5-10 条针对项目的研究思路
+   - **不往你的项目里写任何文件**——脚本只存在 session 目录里（可 resume），不污染仓库、不需要 gitignore
 4. **报告** — 输出分类统计、指标、命令摘要
 
-生成完成后，用户可通过 Workflow tool 启动自动实验循环，无需人工干预。
+组装完成后，skill 把 workflow 给你过目、确认后用 Workflow 工具**内联运行**（脚本只落在 session 目录、不进项目仓库），无需人工干预。
 
 ## 安装
 
@@ -41,11 +42,11 @@ git clone https://github.com/ACautomata/autoresearch-bootstrap.git .claude/skill
 /autoresearch-bootstrap
 ```
 
-Skill 会自动开始探索你的项目，过程中可能会问你几个问题（如噪声地板阈值、代码复杂度阈值），确认后会生成 workflow 脚本。
+Skill 会自动开始探索你的项目，过程中会问你几个问题（噪声地板 / 复杂度阈值，以及**本次的研究聚焦方向和实验上限**），确认后把 workflow 组装出来给你过目。
 
-之后可通过 Claude Code 的 Workflow tool 启动自动实验循环。
+确认后用 Workflow 工具内联启动自动实验循环（不落盘到项目）。
 
-## 生成的 workflow 包含什么
+## 组装的 workflow 包含什么
 
 | 阶段 | 内容 |
 |---|---|
@@ -62,7 +63,7 @@ autoresearch-bootstrap/
 ├── SKILL.md                          # Skill 主文件，定义 4 阶段工作流
 └── references/
     ├── classification-guide.md       # prepare.py vs train.py 分类启发式规则
-    ├── workflow-template.js          # workflow 脚本模板（含所有占位符）
+    ├── workflow-template.js          # workflow 结构蓝图（占位符；组装后内联运行，不落盘到项目）
     └── program-template.md           # 旧版 program.md 模板（参考用）
 ```
 
