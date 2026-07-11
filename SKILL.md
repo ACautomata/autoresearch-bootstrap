@@ -52,6 +52,7 @@ Quick reference:
 Identify:
 - **Primary metric**: what number to optimize, which direction is better
 - **Training command**: exact shell command to run training
+- **Validation cadence**: how often validation runs during training (every epoch? every N epochs?), and roughly what one validation pass costs. The autoresearch loop only needs one ranking metric per experiment to decide keep/revert - a per-epoch validation curve is usually wasted wall-clock during the loop (Phase 3 captures a last-epoch-only command when the project supports it).
 - **Budget**: epochs, steps, or time limit
 - **Output format**: what the training script prints when done
 
@@ -83,9 +84,9 @@ Phases 1–2 established project-level facts (the metric, the train command, wha
 | `{noise_floor}` | **number** | No quotes — JS number literal |
 | `{complex_code_lines}` | **number** | No quotes — JS number literal |
 | `{simplicity_threshold_guidance}` | string | Prose explaining what noise_floor/maxLines mean for this project |
-| `{train_command}` | string | Exact shell command |
+| `{train_command}` | string | Exact shell command - prefer the last-epoch-val variant (see Validation cadence) |
 | `{train_command_with_logging}` | string | Command with `> run.log 2>&1` |
-| `{metric_extract_command}` | string | Shell command to extract metric |
+| `{metric_extract_command}` | string | Shell command to extract metric - grab the single end-of-run line, e.g. `grep "val_loss:" run.log \| tail -1` |
 | `{additional_metric_extract_commands}` | string | Extra grep commands |
 | `{budget_description}` | string | e.g. `"5 epochs"` |
 | `{max_duration}` | string | Max wall time (timeout) e.g. `"10 minutes"` |
@@ -103,6 +104,14 @@ Phases 1–2 established project-level facts (the metric, the train command, wha
 - Metric scale (e.g., val_loss ~1.0 → noise floor ~0.001; FID ~50 → noise floor ~0.5)
 - Codebase size (small project → lower line threshold ~10; large project → ~20)
 - Present your proposed values to the user and get confirmation before writing them
+
+**Validation cadence — must ask the user**: Per-epoch validation is usually the single biggest time sink in an autoresearch loop, because the loop only needs ONE ranking metric per experiment (to decide keep/revert) - not a per-epoch validation curve. Before filling `{train_command}`, surface this tradeoff to the user:
+1. Note how often the project validates today and what one validation costs (e.g. "your training validates every epoch; each val is a frozen-VAE decode + N-step rollout + metric on the held-out set - over a 40-epoch experiment that's ~40x that cost, and the loop only uses the final number").
+2. Ask the user for a train command that validates **only on the last epoch** - one val pass at the end of training instead of every epoch. This keeps a genuine ranking metric while cutting `(epochs - 1) x val_time` per experiment. For fixed-epoch Lightning runs (`max_epochs = n_epochs`) this is typically `Trainer(check_val_every_n_epoch = n_epochs)` (add `num_sanity_val_steps = 0` to also skip the default 2-batch pre-training sanity pass). If the run can stop before the final epoch (max_steps / max_time / early stopping), the final validation won't fire - use an explicit post-training eval command instead. Adapt to other frameworks (HF Trainer `eval_strategy`, custom eval scripts, etc.).
+3. Fill `{train_command}` / `{train_command_with_logging}` with that val-minimized command, make `{metric_extract_command}` grab the single end-of-run validation line (e.g. `grep "val_loss:" run.log | tail -1`) - the command should yield nothing if final validation never ran (early stop / crash), so the run is treated as crash/discard rather than read as a bogus low metric, and fill `{expected_duration}` / `{max_duration}` for the val-minimized run (faster than full-val training) so the anomaly guard stays calibrated.
+4. If the project has no knob to reduce val frequency, say so plainly and leave `{train_command}` as the normal full-val command - do not invent a knob that doesn't exist. The loop still works; it just won't save the val time.
+
+Why "last-epoch-only" and not "no validation at all": keep/revert needs a real metric to rank experiments. Disabling validation entirely leaves no ranking signal, so the loop can't decide what to keep. One val pass at the end is the minimum that preserves it. (Existing crash handling and the keep/revert comparison already absorb diverged runs - a hard failure or non-finite metric is reported as crash/discard and rolled back; a soft divergence just yields a bad final metric and gets discarded - so dropping per-epoch val costs only the ability to early-stop a diverging run, which is the time tradeoff the user opted into.)
 
 **Output format — must be concrete**: For the metric extract command, trace the training script's print/logging statements and construct a realistic grep command. Do NOT leave a vague description. Provide grep commands for all useful secondary metrics.
 
