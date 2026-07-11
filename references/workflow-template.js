@@ -56,7 +56,6 @@ const RESULT_SCHEMA = {
     metric:   { type: "number" },
     memory:   { type: "number" },
     status:   { type: "string", enum: ["keep", "discard", "crash"] },
-    insight:  { type: "string" },
   },
   required: ["metric", "memory", "status"],
 }
@@ -139,7 +138,7 @@ ${Object.entries(C.secondary).map(([k, v]) => `   - ${k}: ${v}`).join('\n')}
    If a critical secondary degrades significantly while primary improves, flag for human review instead of auto-keeping.
 7. If discard/crash: DO NOT attempt git reset yourself — just report status=discard or status=crash and the metric value. The orchestrator will handle rollback.
 8. If crash with simple fix: fix, re-run once, re-evaluate.
-Report metric, memory, status, and a one-line insight.`, {
+Report metric, memory, and status.`, {
     label: `eval-${n}`,
     schema: RESULT_SCHEMA,
   })
@@ -154,12 +153,8 @@ Report metric, memory, status, and a one-line insight.`, {
   }
 
   phase('Record')
-  await agent(`Record experiment #${n} results:
-1. Append to results.tsv (tab-separated):
-   $(git rev-parse --short HEAD)\t${res.metric}\t${res.memory}\t${res.status}\t${idea.idea.slice(0, 80)}
-2. Write memory note at ~/.claude/projects/<project>/memory/exp_${C.tag}_${idea.idea.replace(/[^a-z0-9]/gi, '_').slice(0, 30)}.md:
-   Frontmatter: name, description, metadata type=project
-   Body sections: Idea / Result / Verdict / Insight (5-10 lines total)`, {
+  await agent(`Record experiment #${n} results. Append one row to results.tsv (tab-separated):
+   $(git rev-parse --short HEAD)\t${res.metric}\t${res.memory}\t${res.status}\t${idea.idea.slice(0, 80)}`, {
     label: `rec-${n}`,
   })
 
