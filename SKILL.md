@@ -14,27 +14,21 @@ description: >
 
 # Autoresearch Bootstrap
 
-Assemble a Claude Code workflow that enables autonomous ML research on any project, following the karpathy/autoresearch pattern: fixed infrastructure (prepare.py scope) + modifiable training code (train.py scope) + automated experiment loop. The workflow is built fresh for each invocation from the user's stated intent and run inline — it is never written into the target project.
+Assemble a Claude Code workflow that runs autonomous ML research on any project, following the karpathy/autoresearch pattern: fixed infrastructure (prepare.py scope) + modifiable training code (train.py scope) + automated experiment loop. The workflow is built fresh for each run from the user's stated intent and run inline via the Workflow tool — it is never written into the target project.
 
-## Workflow
-
-### Phase 1: Explore
+## Phase 1 — Explore
 
 **Read every relevant file. Do not skim.**
 
-1. **Structure**: Glob all Python files. Identify source root, entry points (train/eval scripts), config system (Hydra/argparse/dataclasses).
+1. **Structure**: Glob all Python files. Identify source root, entry points (train/eval), config system (Hydra/argparse/dataclasses).
 2. **Entry points**: Read training and eval entry points fully. Trace the import chain.
-3. **Data flow**: From raw data → preprocessing → model → loss → metric. Read each link.
-4. **Config system**: Read config files and understand how they feed into code.
+3. **Data flow**: raw data → preprocessing → model → loss → metric. Read each link.
+4. **Config system**: Read config files and how they feed into code.
 5. **Docs**: Read README.md, CLAUDE.md, AGENTS.md, pyproject.toml for context.
 
-### Phase 2: Classify
+## Phase 2 — Classify
 
-For every source directory/file, assign to one of two scopes.
-
-**Read [classification-guide.md](references/classification-guide.md)** for heuristics.
-
-Quick reference:
+Assign every source directory/file to one of two scopes. **Read [classification-guide.md](references/classification-guide.md)** for heuristics. Quick reference:
 
 | Category | Scope |
 |---|---|
@@ -43,112 +37,53 @@ Quick reference:
 | Callbacks, logging, checkpointing | prepare.py (fixed) |
 | Type definitions, protocols, utilities | prepare.py (fixed) |
 | Model architectures (encoders, decoders, transformers) | train.py (modifiable) |
-| Training tasks/steps, training loop logic | train.py (modifiable) |
+| Training tasks/steps, training-loop logic | train.py (modifiable) |
 | Loss functions | train.py (modifiable) |
 | Optimizer/LR scheduler construction | train.py (modifiable) |
 | Model factories, runtime composition | train.py (modifiable) |
 | Training entry point | train.py (modifiable) |
 
-Identify:
-- **Primary metric**: what number to optimize, which direction is better
-- **Training command**: exact shell command to run training
-- **Validation cadence**: how often validation runs during training (every epoch? every N epochs?), and roughly what one validation pass costs. The autoresearch loop only needs one ranking metric per experiment to decide keep/revert - a per-epoch validation curve is usually wasted wall-clock during the loop (Phase 3 captures a last-epoch-only command when the project supports it).
-- **Budget**: epochs, steps, or time limit
-- **Output format**: what the training script prints when done
+Then identify, for the generated workflow:
+- **Primary metric** — what number to optimize, which direction is better
+- **Training command** — exact shell command to run training
+- **Validation cadence** — how often it validates today and roughly what one pass costs (drives the last-epoch tradeoff in Phase 3)
+- **Budget** — epochs / steps / time limit
+- **Output format** — what the script prints at end-of-run, and a concrete grep that extracts the primary metric (trace the print/log statements — no vague descriptions), plus a grep per secondary metric
 
-**Multi-metric discipline — must ask the user**: Before proceeding to Phase 3, you MUST:
-1. Ask the user to declare **multiple metrics** available in the project's training output (e.g., val_loss, train_loss, grad_norm, epoch_time, memory, RankMe, FID, etc.)
-2. Ask the user to designate **one** of them as the primary optimization target
-3. Remind the user of this principle: **"When a metric becomes the optimization target, it loses objectivity."** A single metric can be hacked (e.g., lowering val_loss by overfitting, inflating RankMe by shrinking embedding dimension). Always cross-reference secondary metrics to confirm genuine improvement.
-4. Record all declared metrics and include their extraction commands in the generated workflow
+**Multi-metric discipline — ask the user.** Before Phase 3:
+1. Have the user declare the **metrics** available in the training output (e.g. val_loss, train_loss, grad_norm, epoch_time, peak VRAM, FID) and designate **one** as the primary target.
+2. State the principle: **"when a metric becomes the optimization target, it loses objectivity."** A single metric can be hacked (lower val_loss by overfitting, inflate RankMe by shrinking dimension). Cross-reference secondary metrics to confirm a gain is genuine.
+3. Record all declared metrics; secondary ones become `{secondary_metrics_json}` with an expectation each (`stable` / `decrease` / `increase` / `lower_better`).
 
-### Phase 3: Assemble the workflow (inline — never written to the project)
+## Phase 3 — Assemble the workflow (inline — never written to the project)
 
-Phases 1–2 established project-level facts (the metric, the train command, what's in scope). This phase captures what the user wants **this run** and assembles a ready-to-run workflow from it. The assembled workflow is run inline via the Workflow tool and is **never written into the target project** — no `.claude/workflows/` file, no project file of any kind. The Workflow tool persists the script to the *session* directory (out of the repo) so it can be resumed; that is the only copy.
+Phases 1–2 established project-level facts. This phase captures what the user wants **this run** and assembles a ready-to-run workflow from it. The assembled script runs inline via the Workflow tool and is never written into the target project — the only on-disk copy is the session-directory persistence the Workflow tool does itself (enables resume).
 
-**Step 1 — Capture this run's intent (must ask the user).** This is what makes each invocation bespoke rather than a canned loop:
-1. **Research focus** → `{research_focus}`: what should this run concentrate on? (e.g. "reduce peak memory", "push val_loss down", "architectural changes only", "sweep losses".) This steers the experiment agent's idea generation.
-2. **Experiment cap** → `{max_experiments}`: how many experiments this run? Pick a number with the user (the loop hard-stops at this cap regardless of token budget).
-3. **Seed ideas**: any specific ideas the user wants tried first? Prepend them to the auto-generated ideas so they run before invented ones (head of `{research_ideas_json}`).
+**Step 1 — Capture this run's intent (ask the user).** This is what makes each invocation bespoke:
+1. **Research focus** → `{research_focus}`: what should this run concentrate on? (e.g. "reduce peak memory", "push val_loss down", "architectural changes only", "sweep losses".) Steers idea generation.
+2. **Experiment cap** → `{max_experiments}`: how many experiments this run? Pick a number with the user — the loop hard-stops at this cap regardless of token budget.
+3. **Seed ideas**: any specific ideas to try first? Prepend them to `{research_ideas_json}` so they run before invented ones.
 
-**Step 2 — Fill the config object.** Read [workflow-template.js](references/workflow-template.js) — it is the *blueprint* for the workflow's structure (Setup → Baseline → Experiment loop), not a file to save. Fill every `{PLACEHOLDER}` in the `C` (config) object with values from Phases 1–2 plus Step 1.
+**Step 2 — Fill the config.** Read [workflow-template.js](references/workflow-template.js) — it is the *blueprint* (Setup → Baseline → Experiment loop), not a file to save. Fill every `{PLACEHOLDER}` in the `C` object from Phases 1–2 + Step 1; the template's trailing "Template Variable Reference" comment documents each field. Three knobs need explicit user confirmation:
 
-**Config values to fill** (all are string literals unless noted):
+- **Simplicity threshold** (`{noise_floor}`, `{complex_code_lines}`): propose values from metric scale (val_loss ~1.0 → floor ~0.001; FID ~50 → floor ~0.5) and codebase size (small → ~10 lines; large → ~20), then confirm before writing.
+- **Validation cadence** (`{train_command}`): per-epoch validation is usually the biggest wall-clock sink in the loop, because keep/revert needs only ONE ranking number per experiment — not a per-epoch curve. Surface this tradeoff and ask for a command that validates **only on the last epoch** (one val pass at the end). For fixed-epoch Lightning runs (`max_epochs = n_epochs`) this is typically `Trainer(check_val_every_n_epoch = n_epochs, num_sanity_val_steps = 0)`; for HF Trainer use `eval_strategy`; adapt for custom eval scripts. If the run can stop before the final epoch (max_steps / max_time / early stopping), the final validation won't fire — use an explicit post-training eval command instead. If the project has no knob to reduce val frequency, say so and leave `{train_command}` as the normal full-val command; don't invent a knob. Why last-epoch and not *no* validation: keep/revert needs a real metric to rank experiments, and one val pass at the end is the minimum that preserves it. Point `{metric_extract_command}` at the single end-of-run validation line so a run that never validated (early stop / crash) yields nothing and is treated as discard rather than a bogus low metric.
+- **Crash sentinel** (`{crash_value}`): a metric value meaning "this run crashed" (e.g. `999.0` when direction is lowest).
 
-| Placeholder | Type | Notes |
-|---|---|---|
-| `{PROJECT_NAME}` | string | From README or pyproject.toml |
-| `{today_short_tag}` | string | e.g. `may29` |
-| `{primary_metric}` | string | Main evaluation metric |
-| `{best_direction}` | string | `"lowest"` or `"highest"` |
-| `{noise_floor}` | **number** | No quotes — JS number literal |
-| `{complex_code_lines}` | **number** | No quotes — JS number literal |
-| `{simplicity_threshold_guidance}` | string | Prose explaining what noise_floor/maxLines mean for this project |
-| `{train_command}` | string | Exact shell command - prefer the last-epoch-val variant (see Validation cadence) |
-| `{train_command_with_logging}` | string | Command with `> run.log 2>&1` |
-| `{metric_extract_command}` | string | Shell command to extract metric - grab the single end-of-run line, e.g. `grep "val_loss:" run.log \| tail -1` |
-| `{additional_metric_extract_commands}` | string | Extra grep commands |
-| `{budget_description}` | string | e.g. `"5 epochs"` |
-| `{max_duration}` | string | Max wall time (timeout) e.g. `"10 minutes"` |
-| `{expected_duration}` | string | Normal run duration for anomaly detection e.g. `"5 minutes"` |
-| `{data_verification_steps}` | string | How to verify data |
-| `{crash_value}` | **number** | No quotes — sentinel metric for crashes (e.g. `999.0`) |
-| `{research_ideas_json}` | **JSON array** | Replace `/* ... */ []` with `["idea1", ...]` |
-| `{research_focus}` | string | What this run concentrates on (steers idea generation) |
-| `{max_experiments}` | **number** | No quotes — hard cap on experiments this run (e.g. `20`) |
-| `{train_scope_list_json}` | **JSON array** | Replace `/* ... */ []` with `["path/", ...]` |
-| `{prepare_scope_list_json}` | **JSON array** | Replace `/* ... */ []` with `["path/", ...]` |
-| `{secondary_metrics_json}` | **JSON object** | Replace `/* ... */ {}` with `{"metric":"stable"}`. Values: `"stable"`, `"decrease"`, `"increase"`, `"lower_better"`, or free-text |
+**Step 3 — Assemble the script string.** Substitute every placeholder with its filled value into one JS string held in context. Sanity-check it parses: number placeholders are bare numbers (no quotes), and the `/* ... */ []` / `/* ... */ {}` sentinels are real JS arrays/objects. Carry the string into Phase 4 — do **not** write it into the project.
 
-**Simplicity threshold — must ask the user**: Before filling `{noise_floor}`, `{complex_code_lines}`, propose concrete values based on:
-- Metric scale (e.g., val_loss ~1.0 → noise floor ~0.001; FID ~50 → noise floor ~0.5)
-- Codebase size (small project → lower line threshold ~10; large project → ~20)
-- Present your proposed values to the user and get confirmation before writing them
+## Phase 4 — Review, then run inline
 
-**Validation cadence — must ask the user**: Per-epoch validation is usually the single biggest time sink in an autoresearch loop, because the loop only needs ONE ranking metric per experiment (to decide keep/revert) - not a per-epoch validation curve. Before filling `{train_command}`, surface this tradeoff to the user:
-1. Note how often the project validates today and what one validation costs (e.g. "your training validates every epoch; each val is a frozen-VAE decode + N-step rollout + metric on the held-out set - over a 40-epoch experiment that's ~40x that cost, and the loop only uses the final number").
-2. Ask the user for a train command that validates **only on the last epoch** - one val pass at the end of training instead of every epoch. This keeps a genuine ranking metric while cutting `(epochs - 1) x val_time` per experiment. For fixed-epoch Lightning runs (`max_epochs = n_epochs`) this is typically `Trainer(check_val_every_n_epoch = n_epochs)` (add `num_sanity_val_steps = 0` to also skip the default 2-batch pre-training sanity pass). If the run can stop before the final epoch (max_steps / max_time / early stopping), the final validation won't fire - use an explicit post-training eval command instead. Adapt to other frameworks (HF Trainer `eval_strategy`, custom eval scripts, etc.).
-3. Fill `{train_command}` / `{train_command_with_logging}` with that val-minimized command, make `{metric_extract_command}` grab the single end-of-run validation line (e.g. `grep "val_loss:" run.log | tail -1`) - the command should yield nothing if final validation never ran (early stop / crash), so the run is treated as crash/discard rather than read as a bogus low metric, and fill `{expected_duration}` / `{max_duration}` for the val-minimized run (faster than full-val training) so the anomaly guard stays calibrated.
-4. If the project has no knob to reduce val frequency, say so plainly and leave `{train_command}` as the normal full-val command - do not invent a knob that doesn't exist. The loop still works; it just won't save the val time.
-
-Why "last-epoch-only" and not "no validation at all": keep/revert needs a real metric to rank experiments. Disabling validation entirely leaves no ranking signal, so the loop can't decide what to keep. One val pass at the end is the minimum that preserves it. (Existing crash handling and the keep/revert comparison already absorb diverged runs - a hard failure or non-finite metric is reported as crash/discard and rolled back; a soft divergence just yields a bad final metric and gets discarded - so dropping per-epoch val costs only the ability to early-stop a diverging run, which is the time tradeoff the user opted into.)
-
-**Output format — must be concrete**: For the metric extract command, trace the training script's print/logging statements and construct a realistic grep command. Do NOT leave a vague description. Provide grep commands for all useful secondary metrics.
-
-The generated workflow must contain:
-1. **Setup phase**: branch creation, data verification, results.tsv init
-2. **Baseline phase**: unmodified training run to establish reference
-3. **Experiment loop**: propose → apply → train → evaluate → record → keep/revert
-4. **Multi-metric discipline**: cross-reference secondary metrics before declaring improvement
-5. **Memory notes**: every experiment logged to Claude memory
-6. **results.tsv**: every experiment recorded
-
-**Step 3 — Assemble the script string.** Produce the final workflow JavaScript by substituting every placeholder in the blueprint with its filled value — one JS string held in context. Sanity-check it parses: number placeholders are bare numbers (no quotes), and the `/* ... */ []` / `/* ... */ {}` sentinels are replaced with real JS arrays/objects. The trailing "Template Variable Reference" block at the end of the blueprint is a comment, so it's harmless to leave in.
-
-**Do not write this script into the target project** — no `.claude/workflows/`, no project file. Carry the assembled string into Phase 4, which runs it inline via the Workflow tool.
-
-### Phase 4: Review, then run inline
-
-**Step 1 — Show the user what will run.** Before launching, present a concise recap and wait for the go-ahead — autonomous loops burn real compute, so a quick look first is worth it:
-- Files classified: N prepare.py scope, M train.py scope
-- Primary metric + direction, and the secondary metrics being cross-referenced
-- Training command and budget
-- **This run's intent**: focus, experiment cap, seeded ideas
-- Where results land: `results.tsv` (untracked) + per-experiment memory notes
-
-Offer to show the full assembled workflow script if the user wants to inspect it.
-
-**Step 2 — Run it inline.** On the user's go, invoke the **Workflow tool** with `script` set to the assembled workflow string. Pass it inline — do **not** point `scriptPath` at a file in the project. The Workflow tool runs the script and persists it to the session directory (out of the repo), so it can be resumed; nothing is written into the target project.
-
-**Step 3 — Report.** Confirm the workflow is running inline, restate the primary metric + direction and the experiment cap, and note that each experiment will append to `results.tsv` and write a memory note as the loop proceeds.
+1. **Recap before launching** — autonomous loops burn real compute, so a quick look is worth it: files classified (N prepare / M train), primary metric + direction, secondary metrics being cross-referenced, training command + budget, this run's intent (focus / cap / seeded ideas), and that results land in `results.tsv` (untracked). Offer to show the full assembled script.
+2. **Run inline** — on the user's go, invoke the **Workflow tool** with `script` set to the assembled string. Pass it inline; do **not** point `scriptPath` at a file in the project.
+3. **Report** — confirm the workflow is running, restate the primary metric + direction and the experiment cap, and note that each experiment appends one row to `results.tsv`.
 
 ## Rules
 
-- **Project-agnostic**: works on any ML project
-- **Read before classifying**: never guess a file's role — read it
-- **All placeholders must be filled**: no template boilerplate in the assembled workflow
-- **Never write the workflow into the target project**: assemble it inline and run it via the Workflow tool (inline `script`). The only on-disk copy is the session-directory persistence the Workflow tool does itself — never `.claude/workflows/` in the repo
-- **Tailor per invocation**: capture the run's focus, experiment cap, and seed ideas (Phase 3 Step 1) — the same project can be bootstrapped differently each time
-- **Concrete shell commands**: the workflow must contain exact runnable commands
-- **Metric must be unambiguous**: specify exact number, exact direction, exact extraction method
-- **Valid JS output**: the assembled workflow must be valid JavaScript — number placeholders as bare numbers, JSON arrays/objects as JS literals
+- **Project-agnostic**: works on any ML project.
+- **Read before classifying**: never guess a file's role — read it.
+- **All placeholders filled**: no template boilerplate in the assembled workflow.
+- **Never write the workflow into the target project**: assemble inline and run via the Workflow tool (inline `script`). The only on-disk copy is the Workflow tool's own session-directory persistence — never `.claude/workflows/` in the repo.
+- **Tailor per invocation**: capture the run's focus, cap, and seed ideas — the same project bootstraps differently each time.
+- **Concrete commands + unambiguous metric**: exact number, exact direction, exact extraction command.
+- **Valid JS output**: numbers bare, arrays/objects as JS literals.
