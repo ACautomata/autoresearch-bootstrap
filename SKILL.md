@@ -74,7 +74,7 @@ Phases 1–2 established project-level facts. This phase captures what the user 
 
 ## Phase 4 — Review, then run inline
 
-1. **Recap before launching** — autonomous loops burn real compute, so a quick look is worth it: files classified (N prepare / M train), primary metric + direction, secondary metrics being cross-referenced, training command + budget, this run's intent (focus / cap / seeded ideas), and that results land in `results.tsv` (untracked). Offer to show the full assembled script.
+1. **Recap before launching** — autonomous loops burn real compute, so a quick look is worth it: files classified (N prepare / M train), primary metric + direction, secondary metrics being cross-referenced, training command, budget, and the maxTime kill bound, this run's intent (focus / cap / seeded ideas), and that results land in `results.tsv` (untracked). Offer to show the full assembled script.
 2. **Run inline** — on the user's go, invoke the **Workflow tool** with `script` set to the assembled string. Pass it inline; do **not** point `scriptPath` at a file in the project.
 3. **Report** — confirm the workflow is running, restate the primary metric + direction and the experiment cap, and note that each experiment appends one row to `results.tsv`.
 
@@ -86,4 +86,5 @@ Phases 1–2 established project-level facts. This phase captures what the user 
 - **Never write the workflow into the target project**: assemble inline and run via the Workflow tool (inline `script`). The only on-disk copy is the Workflow tool's own session-directory persistence — never `.claude/workflows/` in the repo.
 - **Tailor per invocation**: capture the run's focus, cap, and seed ideas — the same project bootstraps differently each time.
 - **Concrete commands + unambiguous metric**: exact number, exact direction, exact extraction command.
+- **Experiment lifecycle ≠ agent lifecycle**: each training run is a self-terminating background process - launched kill-bounded by `maxTime` (a `timeout`/wall-time wrapper so the process dies at the deadline, NOT an agent watching a clock deciding to kill), awaited via ONE Bash `run_in_background` completion notification (never poll, never spawn check-agents), then a SEPARATE short agent extracts metrics and decides keep/discard. So a minimal launcher/awaiter agent owns the run's lifetime, and a different short agent does the ML reasoning afterward - no reasoning agent is held alive for the training duration, and `maxTime` is enforced by the process itself (killed-at-deadline -> crash). While the whole workflow runs in the background, the Workflow tool notifies you on completion - don't keep spawning check-agents; at most start ONE Monitor on `results.tsv` / the run log.
 - **Valid JS output**: numbers bare, arrays/objects as JS literals.

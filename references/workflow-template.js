@@ -14,6 +14,7 @@ export const meta = {
     { title: 'Setup' },
     { title: 'Baseline' },
     { title: 'Experiment' },
+    { title: 'Run' },
     { title: 'Evaluate' },
     { title: 'Record' },
   ],
@@ -37,8 +38,7 @@ const C = {
   extractCmd:      '{metric_extract_command}',
   extraExtract:    '{additional_metric_extract_commands}',
   budget:          '{budget_description}',
-  maxTime:         '{max_duration}',
-  expectedTime:    '{expected_duration}',   // normal run duration for comparison
+  maxTime:         '{max_duration}',   // hard kill bound - the run process is killed at this deadline
   verifyData:      '{data_verification_steps}',
   crashMetric:     {crash_value},           // number — metric sentinel for crashed runs
   ideas:           /* {research_ideas_json} */[],
@@ -60,6 +60,20 @@ const RESULT_SCHEMA = {
   required: ["metric", "memory", "status"],
 }
 
+// What a Run agent reports: the experiment process ended (finished or killed at the maxTime
+// deadline). No metric, no keep/discard - that is the Evaluate agent's job. This split keeps
+// the experiment lifecycle (a bounded background process) decoupled from the agent lifecycle
+// (short launch/wait + short evaluate), so no reasoning agent is held alive for the training.
+const RUN_SCHEMA = {
+  type: "object",
+  properties: {
+    exit_code: { type: "number" },
+    timed_out: { type: "boolean" },
+    log:       { type: "string" },
+  },
+  required: ["timed_out", "log"],
+}
+
 /* ── Setup ──────────────────────────────────────────────────── */
 phase('Setup')
 await agent(`Set up autonomous research for ${C.project}:
@@ -70,12 +84,23 @@ Report ready status.`)
 
 /* ── Baseline ───────────────────────────────────────────────── */
 phase('Baseline')
-const bl = await agent(`Run baseline training for ${C.project}:
-1. Execute: ${C.trainLog}
-2. Timeout: ${C.maxTime}
-3. Extract primary: ${C.extractCmd}
-4. Extract secondary: ${C.extraExtract}
-Report metric and memory.`, {schema: RESULT_SCHEMA})
+// Experiment lifecycle: launch baseline as a self-terminating background process, await ONE
+// completion notification, then hand off. maxTime is a KILL bound (the process dies at the
+// deadline) - not a "keep waiting and flag" threshold. The launcher/awaiter carries no ML
+// reasoning; extraction is the next agent's job, so no reasoning agent spans the training.
+const blRun = await agent(`Run baseline training for ${C.project} (experiment lifecycle - bounded, self-terminating):
+1. Launch ${C.trainLog} as a KILL-BOUNDED background process that dies at the ${C.maxTime} deadline - wrap it so the process self-terminates at the deadline (Linux/local: e.g. timeout <seconds> ${C.trainLog}; remote fire-and-forget: embed a remote timeout or scheduler wall-time in the launch). The experiment must own its own deadline - do NOT watch a clock to decide whether to kill it.
+2. Start it via Bash run_in_background. For a local launch the task completing IS the process ending (finished or killed-at-deadline); for a remote fire-and-forget launch, start a single run_in_background until-loop (until <done-flag>; do sleep 60; done) that exits when the remote run finishes or is killed. You get exactly ONE completion notification - never poll, never spawn check-agents, never chunk the wait into foreground retries.
+3. Report whether the run was killed at the ${C.maxTime} deadline (timed_out), the exit code, and the log path. Do NOT extract metrics or decide keep/discard - that is the next step's job.`, {schema: RUN_SCHEMA})
+
+// Agent lifecycle (short): the run is dead; now extract + reason. This agent does not span training,
+// and maxTime was already enforced by the run process itself (killed-at-deadline -> crash below).
+const bl = await agent(`Evaluate the finished baseline run for ${C.project}:
+Run outcome: ${blRun.timed_out ? 'killed at the ' + C.maxTime + ' deadline (timed out) - treat as crash' : 'finished'}. Log: ${blRun.log}.
+1. Extract primary: ${C.extractCmd}
+2. Extract secondary: ${C.extraExtract}
+3. If the run was killed at the deadline (timed_out) or no metric is found, status=crash - a killed/incomplete run yields nothing, never a bogus low metric.
+Report metric, memory, and status.`, {schema: RESULT_SCHEMA})
 
 log(`Baseline ${C.metric}=${bl.metric}, memory=${bl.memory}GB`)
 
@@ -124,20 +149,34 @@ Apply the change and report the idea and files modified.`, {
       .slice(0, 60) || 'experiment'
   )
 
+  phase('Run')
+  // Experiment lifecycle: commit the experiment, then launch it as a self-terminating background
+  // process bounded by maxTime (KILL at deadline). This agent is a minimal launcher/awaiter -
+  // no ML reasoning, no extraction - so no reasoning agent is held alive for the training duration.
+  const run = await agent(`Run experiment #${n} training for ${C.project} (experiment lifecycle - bounded, self-terminating):
+1. Commit the experiment: git add -A && printf '%s\n' "exp${n}: ${safeIdeaForCommit}" | git commit -F -
+2. Launch ${C.trainLog} as a KILL-BOUNDED background process that dies at the ${C.maxTime} deadline - wrap it so the process self-terminates at the deadline (Linux/local: e.g. timeout <seconds> ${C.trainLog}; remote fire-and-forget: embed a remote timeout or scheduler wall-time in the launch). The experiment must own its own deadline - do NOT watch a clock to decide whether to kill it.
+3. Start it via Bash run_in_background. For a local launch the task completing IS the process ending (finished or killed-at-deadline); for a remote fire-and-forget launch, start a single run_in_background until-loop (until <done-flag>; do sleep 60; done) that exits when the remote run finishes or is killed. You get exactly ONE completion notification - never poll, never spawn check-agents, never chunk the wait into foreground retries.
+4. Report whether the run was killed at the ${C.maxTime} deadline (timed_out), the exit code, and the log path. Do NOT extract metrics or decide keep/discard - that is the next step's job.`, {
+    label: `run-${n}`,
+    schema: RUN_SCHEMA,
+  })
+
   phase('Evaluate')
-  const res = await agent(`Evaluate experiment #${n} ("${idea.idea}"):
-1. Commit: git add -A && printf '%s\n' "exp${n}: ${safeIdeaForCommit}" | git commit -F -
-2. Run: ${C.trainLog}
-3. Timeout: ${C.maxTime}
-   - If run exceeds ${C.expectedTime} significantly, still wait for completion but flag as anomalous.
-4. Extract: ${C.extractCmd} + ${C.extraExtract}
-5. Compare with best=${best}. ${C.direction} is better.
-6. Evaluate secondary metrics. The secondary metrics expectations are:
+  // Agent lifecycle (short): the run is dead; now extract + reason + decide. This agent does not
+  // span training, and maxTime was already enforced by the run process itself (killed-at-deadline
+  // -> crash below). It does not launch or re-run training - one experiment = one bounded run.
+  const res = await agent(`Evaluate the finished run for experiment #${n} ("${idea.idea}"):
+Run outcome: ${run.timed_out ? 'killed at the ' + C.maxTime + ' deadline (timed out) - treat as crash' : 'finished'}. Log: ${run.log}.
+1. Extract primary: ${C.extractCmd}
+2. Extract secondary: ${C.extraExtract}
+3. If the run was killed at the deadline (timed_out) or no metric is found, status=crash - a killed/incomplete run yields nothing, never a bogus low metric.
+4. Compare with best=${best}. ${C.direction} is better.
+5. Evaluate secondary metrics. The secondary metrics expectations are:
 ${Object.entries(C.secondary).map(([k, v]) => `   - ${k}: ${v}`).join('\n')}
    Interpretation: "stable" = within ~10% of baseline; "decrease" = improved (same direction as primary); "increase" = higher is better even if primary goes down; "lower_better" = inverse of primary direction.
    If a critical secondary degrades significantly while primary improves, flag for human review instead of auto-keeping.
-7. If discard/crash: DO NOT attempt git reset yourself — just report status=discard or status=crash and the metric value. The orchestrator will handle rollback.
-8. If crash with simple fix: fix, re-run once, re-evaluate.
+6. If discard/crash: DO NOT attempt git reset yourself - just report status=discard or status=crash and the metric value. The orchestrator will handle rollback.
 Report metric, memory, and status.`, {
     label: `eval-${n}`,
     schema: RESULT_SCHEMA,
@@ -187,8 +226,7 @@ return { experiments: n, best, baseline: bl.metric }
    | {metric_extract_command}      | string   | Shell command to extract metric  | grep "^val_loss:" run.log    |
    | {additional_metric_extract_commands} | string | Extra grep commands         | grep "^peak_vram_mb:" run.log|
    | {budget_description}          | string   | Training budget                  | 5 epochs                     |
-   | {max_duration}                | string   | Max wall time per experiment     | 10 minutes                   |
-   | {expected_duration}           | string   | Normal run duration (for anomaly detection) | 5 minutes        |
+   | {max_duration}                | string   | Hard kill bound per experiment (run is killed at this deadline) | 10 minutes        |
    | {data_verification_steps}     | string   | How to verify data is ready       | Check data shards exist      |
    | {crash_value}                 | number   | Metric sentinel for crashes      | 999.0                        |
    | {research_ideas_json}         | JSON[]   | Array of idea strings            | ["Increase LR", "Add dropout"]|
