@@ -13,10 +13,9 @@ export const meta = {
   phases: [
     { title: 'Setup' },
     { title: 'Baseline' },
-    { title: 'Experiment' },
+    { title: 'Plan' },
     { title: 'Run' },
-    { title: 'Evaluate' },
-    { title: 'Record' },
+    { title: 'Analyze' },
   ],
 }
 
@@ -74,6 +73,21 @@ const RUN_SCHEMA = {
   required: ["timed_out", "log"],
 }
 
+// What the Analyze agent reports: metrics + keep/discard decision + a short analysis text that gets
+// stacked into `history` and fed to the next loop's Plan agent. This agent also owns git maintenance
+// (rollback on discard/crash) and the results.tsv append - folding the old reset/record steps in, so
+// the experiment loop is exactly three agents: Plan, Run, Analyze.
+const ANALYSIS_SCHEMA = {
+  type: "object",
+  properties: {
+    metric:   { type: "number" },
+    memory:   { type: "number" },
+    status:   { type: "string", enum: ["keep", "discard", "crash"] },
+    analysis: { type: "string" },
+  },
+  required: ["metric", "memory", "status", "analysis"],
+}
+
 /* ── Setup ──────────────────────────────────────────────────── */
 phase('Setup')
 await agent(`Set up autonomous research for ${C.project}:
@@ -105,68 +119,91 @@ Report metric, memory, and status.`, {schema: RESULT_SCHEMA})
 log(`Baseline ${C.metric}=${bl.metric}, memory=${bl.memory}GB`)
 
 /* ── Experiment Loop ────────────────────────────────────────── */
+// Three agents per iteration:
+//   Plan   - stacks ALL prior results (history) -> picks/invents the next idea, modifies train.py-scope
+//            code, snapshots pre-experiment HEAD for rollback.
+//   Run    - commits the experiment, launches the self-terminating training (kill-bounded by maxTime via
+//            the timeout embedded in C.trainLog), awaits ONE completion notification, safety-net kills
+//            anything still alive past the deadline. No ML reasoning, no extraction.
+//   Analyze- extracts metrics, decides keep/discard, MAINTAINS GIT (rollback on discard/crash), appends
+//            results.tsv, writes a short analysis stacked into the next Plan prompt.
+// `history` accumulates every experiment's outcome so each Plan agent sees the full set of prior results,
+// not just the static seed-idea list. Seeded with the baseline (experiment #0).
 let best = bl.metric
 let n = 0
 const MAX = C.maxExperiments
+const history = [{
+  n: 0,
+  idea: 'baseline',
+  metric: bl.metric,
+  status: bl.status,
+  analysis: `Baseline ${C.metric}=${bl.metric}, memory=${bl.memory}GB. Reference point to beat.`,
+}]
 
 while ((budget.total ? budget.remaining() > 50000 : n < MAX) && n < MAX) {
   n++
 
-  // Snapshot git HEAD before experiment changes — used for rollback on discard/crash
-  const preCommit = await agent('git rev-parse HEAD', {schema: {type: "object", properties: {head: {type: "string"}}, required: ["head"]}})
-
-  phase('Experiment')
-  const idea = await agent(`Experiment #${n} for ${C.project}.
+  /* ── Agent 1: exp plan agent ── */
+  phase('Plan')
+  const plan = await agent(`Plan experiment #${n} for ${C.project}.
 Run focus: ${C.focus}
 Best ${C.metric}=${best} (${C.direction} is better). Noise floor: ${C.noiseFloor}.
 ${C.simplicityGuide}
 
-Research ideas:
+ALL previous experiment results (stacked - decide the next direction from this full history, not just the seed ideas):
+${history.map(h => `  #${h.n} [${h.status}] ${C.metric}=${h.metric}  idea="${h.idea}"  -> ${h.analysis}`).join('\n')}
+
+Seed ideas (run the early ones first if still untried):
 ${C.ideas.map((s, i) => `${i + 1}. ${s}`).join('\n')}
 
-Pick an untried idea or invent a new one based on patterns so far.
-Only modify train.py scope files: ${JSON.stringify(C.trainScope)}
-Do NOT touch prepare.py scope: ${JSON.stringify(C.prepareScope)}
-
-Apply the change and report the idea and files modified.`, {
-    label: `exp-${n}`,
+Your job:
+1. Snapshot current HEAD for rollback: run git rev-parse HEAD and record the hash as preCommit.
+2. Decide the next direction from the full history above (and the seed ideas). Pick an untried idea or invent a new one from patterns so far - do not repeat a discarded idea unchanged.
+3. Modify ONLY train.py scope files: ${JSON.stringify(C.trainScope)}. Do NOT touch prepare.py scope: ${JSON.stringify(C.prepareScope)}.
+Report the idea, the files you modified, and the preCommit hash.`, {
+    label: `plan-${n}`,
     schema: {
       type: "object",
       properties: {
-        idea:  { type: "string" },
-        files: { type: "array", items: { type: "string" } },
+        idea:      { type: "string" },
+        files:     { type: "array", items: { type: "string" } },
+        preCommit: { type: "string" },
       },
-      required: ["idea", "files"],
+      required: ["idea", "files", "preCommit"],
     },
   })
 
-  log(`#${n}: ${idea.idea}`)
+  log(`#${n} plan: ${plan.idea}`)
   const safeIdeaForCommit = (
-    idea.idea
+    plan.idea
       .replace(/[^a-zA-Z0-9 _]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 60) || 'experiment'
   )
 
+  /* ── Agent 2: exp run/watcher agent ── */
   phase('Run')
-  // Experiment lifecycle: commit the experiment, then launch it as a self-terminating background
-  // process bounded by maxTime (KILL at deadline). This agent is a minimal launcher/awaiter -
-  // no ML reasoning, no extraction - so no reasoning agent is held alive for the training duration.
-  const run = await agent(`Run experiment #${n} training for ${C.project} (experiment lifecycle - bounded, self-terminating):
+  // Experiment lifecycle: commit, then launch the self-terminating training (kill-bounded by maxTime via
+  // the timeout embedded in C.trainLog), await ONE completion notification, safety-net kill anything still
+  // alive past the deadline. Minimal launcher/awaiter - no ML reasoning, no extraction - so no reasoning
+  // agent is held alive for the training duration.
+  const run = await agent(`Run + watch experiment #${n} training for ${C.project} (experiment lifecycle - bounded, self-terminating):
 1. Commit the experiment: git add -A && printf '%s\n' "exp${n}: ${safeIdeaForCommit}" | git commit -F -
-2. Launch ${C.trainLog} as a KILL-BOUNDED background process that dies at the ${C.maxTime} deadline. C.trainLog is ALREADY the complete, deadline-bounded command — for a remote host it includes the ssh + the kill-timer (e.g. timeout <seconds>) + a completion flag, all inline — so launch it VERBATIM via Bash run_in_background; do NOT wrap it further, improvise a separate timeout wrapper, or stage/invoke helper scripts on the remote host. The run must own its own deadline - do NOT watch a clock to decide whether to kill it (the process self-terminates at the deadline).
-3. Start it via Bash run_in_background. For a local launch the task completing IS the process ending (finished or killed-at-deadline); for a remote fire-and-forget launch, start a single run_in_background until-loop (until <done-flag>; do sleep 60; done) that exits when the remote run finishes or is killed. You get exactly ONE completion notification - never poll, never spawn check-agents, never chunk the wait into foreground retries.
-4. Report whether the run was killed at the ${C.maxTime} deadline (timed_out), the exit code, and the log path. Do NOT extract metrics or decide keep/discard - that is the next step's job.`, {
+2. Launch ${C.trainLog} as a KILL-BOUNDED background process that dies at the ${C.maxTime} deadline. C.trainLog is ALREADY the complete, deadline-bounded command - for a remote host it includes the ssh + the kill-timer (e.g. timeout <seconds>) + a completion flag, all inline - so launch it VERBATIM via Bash run_in_background; do NOT wrap it further, improvise a separate timeout wrapper, or stage/invoke helper scripts on the remote host. The run must own its own deadline - it self-terminates at the deadline (killed-at-deadline), so do NOT watch a clock to decide whether to kill it.
+3. Await exactly ONE completion notification: for a local launch the Bash run_in_background task ending IS the process ending (finished or killed-at-deadline); for a remote fire-and-forget launch, start a single run_in_background until-loop (until <done-flag>; do sleep 60; done) that exits when the remote run finishes or is killed. Never poll, never spawn check-agents, never chunk the wait into foreground retries.
+4. Safety-net: if the process is somehow still alive past the ${C.maxTime} deadline (the embedded timeout failed to reap it), kill it directly now.
+5. Report whether the run was killed at the ${C.maxTime} deadline (timed_out), the exit code, and the log path. Do NOT extract metrics or decide keep/discard - that is the Analyze agent's job.`, {
     label: `run-${n}`,
     schema: RUN_SCHEMA,
   })
 
-  phase('Evaluate')
-  // Agent lifecycle (short): the run is dead; now extract + reason + decide. This agent does not
-  // span training, and maxTime was already enforced by the run process itself (killed-at-deadline
-  // -> crash below). It does not launch or re-run training - one experiment = one bounded run.
-  const res = await agent(`Evaluate the finished run for experiment #${n} ("${idea.idea}"):
+  /* ── Agent 3: experiment result analysis agent ── */
+  phase('Analyze')
+  // Agent lifecycle (short): the run is dead; now extract + reason + decide + maintain git + record.
+  // Does not span training, and maxTime was already enforced by the run process itself (killed-at-deadline
+  // -> crash below). Does not launch or re-run training - one experiment = one bounded run.
+  const res = await agent(`Analyze the finished run for experiment #${n} ("${plan.idea}") for ${C.project}:
 Run outcome: ${run.timed_out ? 'killed at the ' + C.maxTime + ' deadline (timed out) - treat as crash' : 'finished'}. Log: ${run.log}.
 1. Extract primary: ${C.extractCmd}
 2. Extract secondary: ${C.extraExtract}
@@ -176,26 +213,16 @@ Run outcome: ${run.timed_out ? 'killed at the ' + C.maxTime + ' deadline (timed 
 ${Object.entries(C.secondary).map(([k, v]) => `   - ${k}: ${v}`).join('\n')}
    Interpretation: "stable" = within ~10% of baseline; "decrease" = improved (same direction as primary); "increase" = higher is better even if primary goes down; "lower_better" = inverse of primary direction.
    If a critical secondary degrades significantly while primary improves, flag for human review instead of auto-keeping.
-6. If discard/crash: DO NOT attempt git reset yourself - just report status=discard or status=crash and the metric value. The orchestrator will handle rollback.
-Report metric, memory, and status.`, {
-    label: `eval-${n}`,
-    schema: RESULT_SCHEMA,
+6. MAINTAIN GIT: if status=keep, leave the experiment commit in place. If status=discard or crash, roll back: git reset --hard ${plan.preCommit} (restores the pre-experiment state the Plan agent snapshotted).
+7. Record: append ONE row to results.tsv (tab-separated) with these columns in order, using YOUR extracted/decided values: short HEAD hash, primary metric, memory in GB, status, idea. Example: printf '%s\t%s\t%s\t%s\t%s\n' "$(git rev-parse --short HEAD)" "<metric>" "<memory>" "<status>" "${plan.idea.slice(0, 80)}" >> results.tsv
+8. Write a 1-2 sentence analysis for the NEXT loop's Plan agent: what worked / what didn't / what to try next. This is stacked into the next Plan prompt, so be concrete.
+Report metric, memory, status, and the analysis text.`, {
+    label: `analyze-${n}`,
+    schema: ANALYSIS_SCHEMA,
   })
 
-  // Programmatic rollback if experiment was discarded or crashed
-  // (belt-and-suspenders: protects against the Evaluate agent not self-resetting)
-  if (res.status === 'discard' || res.status === 'crash') {
-    await agent(`git reset --hard ${preCommit.head}`, {
-      label: `reset-${n}`,
-      schema: {type: "object", properties: {ok: {type: "boolean"}}, required: ["ok"]}
-    })
-  }
-
-  phase('Record')
-  await agent(`Record experiment #${n} results. Append one row to results.tsv (tab-separated):
-   $(git rev-parse --short HEAD)\t${res.metric}\t${res.memory}\t${res.status}\t${idea.idea.slice(0, 80)}`, {
-    label: `rec-${n}`,
-  })
+  // Stack this experiment into history so the next Plan agent sees the full set of prior results
+  history.push({ n, idea: plan.idea, metric: res.metric, status: res.status, analysis: res.analysis })
 
   if (res.status === 'keep' && BETTER(res.metric, best)) {
     best = res.metric
